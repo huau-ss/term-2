@@ -112,26 +112,21 @@ def load_system_message(schemas: dict) -> str:
 # Add input validation to prevent SQL injection and other security vulnerabilities
 
 def validate_sql_query(query: str) -> bool:
-    """
-    Ensure the SQL query is valid and safe (select queries only).
 
-    Parameters:
-    - query (str): The SQL query to validate.
-
-    Returns:
-    - bool: True if the query is valid and safe, False otherwise.
-    """
     if not isinstance(query, str):
         return False
 
+    # 禁止危险关键字
     disallowed_keywords = r'\b(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE|EXEC)\b'
 
     if re.search(disallowed_keywords, query, re.IGNORECASE):
         return False
 
+    # 只允许 SELECT / WITH 开头
     if not query.strip().lower().startswith(('select', 'with')):
         return False
 
+    # 检查括号匹配
     if query.count('(') != query.count(')'):
         return False
 
@@ -153,6 +148,7 @@ def validate_query_tables(query: str, schemas: dict) -> bool:
         return False
     return True
 
+#查询数据库
 def get_data(query: str, db_name: str, db_type: str, host: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None) -> pd.DataFrame:
     """Run the specified query and return the complete resulting DataFrame."""
     if not validate_sql_query(query):
@@ -869,6 +865,7 @@ def assess_data_quality(df: pd.DataFrame) -> None:
             else:
                 st.success("No significant anomalies detected!")
 
+#从 LLM 结果里取出 query,调 get_data() 执行查询,展示数据表、统计、图表,显示执行计划（PostgreSQL 时用 EXPLAIN ANALYZE）,导出结果
 def handle_query_response(response: dict, db_name: str, db_type: str, host: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None) -> None:
     """Process LLM-generated SQL query, display results, and handle visualizations."""
     try:
@@ -1038,7 +1035,9 @@ def handle_query_response(response: dict, db_name: str, db_type: str, host: Opti
             st.session_state.query_history = []
             st.session_state.query_timestamps = []
 
-        st.session_state.query_history.append(query)
+        # st.session_state.query_history.append(query)
+        st.session_state.query_history.append(st.session_state.get("last_user_message", query))
+
         st.session_state.query_timestamps.append(pd.Timestamp.now())
 
     except Exception as e:
@@ -1334,11 +1333,13 @@ if db_type == "SQLite":
 
             user_message = st.text_input(placeholder="Type your SQL query here...", key="user_message", label="Your Query 💬", label_visibility="hidden")
             if user_message:
+                st.session_state["last_user_message"] = user_message
                 selected_schemas = {table: schemas[table] for table in selected_tables}
                 logger.debug(f"Schemas being passed to `generate_sql_query`: {selected_schemas}")
                 with st.spinner('🧠 Generating SQL query...'):
                     response = generate_sql_query(user_message, selected_schemas)
                 handle_query_response(response, db_file, db_type='sqlite')
+
 
         else:
             st.info("📭 No tables found in the database.")
@@ -1372,6 +1373,7 @@ elif db_type == "PostgreSQL":
 
             user_message = st.text_input(placeholder="Type your SQL query here...", key="user_message_pg", label="Your Query 💬", label_visibility="hidden")
             if user_message:
+                st.session_state["last_user_message"] = user_message
                 with st.spinner('🧠 Generating SQL query...'):
                     selected_schemas = {table: schemas[table] for table in selected_tables}
                     logger.debug(f"Schemas being passed to `generate_sql_query`: {selected_schemas}")
@@ -1392,6 +1394,8 @@ with st.sidebar.expander(" Query History", expanded=False):
             "Query": st.session_state.query_history,
             "Timestamp": pd.to_datetime(st.session_state.query_timestamps)
         })
+
+        query_history_df = query_history_df.sort_values("Timestamp", ascending=False).reset_index(drop=True)
 
         if search_query:
             query_history_df = query_history_df[query_history_df['Query'].str.contains(search_query, case=False, na=False)]

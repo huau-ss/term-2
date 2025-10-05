@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Test on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11']
+
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d testdb"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # CI 环境下给出“占位” LLM 环境变量，避免模块导入时报 missing-var 错误。
+      # **重要**：真实调用 LLM 的测试需要 mock get_completion_from_messages，
+      # 不要在 CI 中使用真实的 API Key（除非你在 Secrets 安全地配置了它们）。
+      LLM_PROVIDER: GEMINI
+      GEMINI_API_KEY: dummy
+      AZURE_OPENAI_API_KEY: dummy
+      AZURE_OPENAI_ENDPOINT: https://example.com
+      AZURE_OPENAI_DEPLOYMENT: dummy
+      DASHSCOPE_API_KEY: dummy
+
+      # Postgres 连接信息（测试代码可以从 env 读取）
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: testdb
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # dev/test deps (fallback if you don't have requirements-dev.txt)
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; else pip install pytest pytest-mock coverage flake8 bandit pytest-xdist; fi
+
+      - name: Lint (flake8)
+        run: |
+          pip install flake8 || true
+          flake8 .
+
+      - name: Security scan (bandit)
+        run: |
+          pip install bandit || true
+          bandit -r .
+
+      - name: Wait for Postgres (simple retry)
+        run: |
+          for i in {1..10}; do
+            pg_isready -h localhost -p 5432 -U test && break || sleep 2
+          done
+
+      - name: Run tests (pytest + coverage)
+        env:
+          # pass DB url to tests
+          DATABASE_URL: postgresql://test:test@localhost:5432/testdb
+          CI: true
+        run: |
+          pytest -q --maxfail=1 --disable-warnings --cov=.
+
+      - name: Upload coverage to Codecov
+        if: secrets.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}

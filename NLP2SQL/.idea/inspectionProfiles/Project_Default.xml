@@ -1,0 +1,27 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="streamlit" />
+          <option value="streamlit-nested-layout" />
+          <option value="streamlit-extras" />
+          <option value="pandas" />
+          <option value="numpy" />
+          <option value="openpyxl" />
+          <option value="plotly" />
+          <option value="statsmodels" />
+          <option value="scipy" />
+          <option value="psycopg2-binary" />
+          <option value="sqlalchemy" />
+          <option value="python-dotenv" />
+          <option value="openai" />
+          <option value="google-generativeai" />
+          <option value="jsonschema" />
+          <option value="scikit-learn" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
