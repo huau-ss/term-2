@@ -1,3 +1,4 @@
+import decimal
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
@@ -104,10 +105,81 @@ apply_custom_theme()
 
 load_dotenv()
 
+import json
+from datetime import date, datetime
+from decimal import Decimal
+
+
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (date, datetime)):
+            return obj.isoformat()
+        elif isinstance(obj, Decimal):
+            return float(obj)
+        elif hasattr(obj, '__dict__'):
+            return obj.__dict__
+        return super().default(obj)
+
+
 @st.cache_resource
 def load_system_message(schemas: dict) -> str:
     """Load and format the system message with JSON-serialized schemas."""
-    return SYSTEM_MESSAGE.format(schemas=json.dumps(schemas, indent=2))
+    try:
+        # 使用自定义编码器处理日期和Decimal类型
+        serializable_schemas = {}
+        for table_name, table_info in schemas.items():
+            serializable_schemas[table_name] = {}
+
+            # 处理列信息
+            if 'columns' in table_info:
+                serializable_schemas[table_name]['columns'] = table_info['columns']
+
+            # 处理外键
+            if 'foreign_keys' in table_info:
+                serializable_schemas[table_name]['foreign_keys'] = table_info['foreign_keys']
+
+            # 处理索引
+            if 'indexes' in table_info:
+                serializable_schemas[table_name]['indexes'] = table_info['indexes']
+
+            # 处理主键
+            if 'primary_keys' in table_info:
+                serializable_schemas[table_name]['primary_keys'] = table_info['primary_keys']
+
+            # 处理约束
+            if 'constraints' in table_info:
+                serializable_schemas[table_name]['constraints'] = table_info['constraints']
+
+            # 处理触发器
+            if 'triggers' in table_info:
+                serializable_schemas[table_name]['triggers'] = table_info['triggers']
+
+            # 处理样本数据 - 确保所有数据都可序列化
+            if 'sample_data' in table_info:
+                serializable_sample_data = []
+                for row in table_info['sample_data']:
+                    serializable_row = {}
+                    for key, value in row.items():
+                        if isinstance(value, (date, datetime)):
+                            serializable_row[key] = value.isoformat()
+                        elif isinstance(value, Decimal):
+                            serializable_row[key] = float(value)
+                        else:
+                            serializable_row[key] = value
+                    serializable_sample_data.append(serializable_row)
+                serializable_schemas[table_name]['sample_data'] = serializable_sample_data
+
+        serialized_schemas = json.dumps(serializable_schemas, indent=2, cls=CustomJSONEncoder, ensure_ascii=False)
+        return SYSTEM_MESSAGE.format(schemas=serialized_schemas)
+    except Exception as e:
+        logger.error(f"Error serializing schemas: {e}")
+        # 返回一个基本的系统消息，不包含模式信息
+        return SYSTEM_MESSAGE.format(schemas="{}")
+
+# @st.cache_resource
+# def load_system_message(schemas: dict) -> str:
+#     """Load and format the system message with JSON-serialized schemas."""
+#     return SYSTEM_MESSAGE.format(schemas=json.dumps(schemas, indent=2))
 
 # Add input validation to prevent SQL injection and other security vulnerabilities
 
