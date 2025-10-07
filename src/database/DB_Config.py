@@ -7,59 +7,11 @@ import logging
 import json
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
-import psycopg2.pool
 import re
 
 # Configure logging for improved debug and info messages
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Global variable to store PostgreSQL connection pool
-pg_pool = None
-
-def create_pg_pool(minconn: int, maxconn: int, dbname: str, user: str,
-                   password: str, host: str) -> None:
-    """
-    Creates or reinitializes a PostgreSQL connection pool to manage database connections.
-
-    :param minconn: Minimum number of connections in the pool.
-    :param maxconn: Maximum number of connections in the pool.
-    :param dbname:  Name of the database.
-    :param user:    Username for the database.
-    :param password:Password for the database.
-    :param host:    Host address for the database.
-    """
-    global pg_pool
-    try:
-        pg_pool = psycopg2.pool.SimpleConnectionPool(
-            minconn,
-            maxconn,
-            dbname=dbname,
-            user=user,
-            password=password,
-            host=host
-        )
-        if pg_pool:
-            logger.info("PostgreSQL connection pool created successfully.")
-    except Exception as e:
-        logger.error(f"Failed to create PostgreSQL connection pool: {e}")
-
-@contextmanager
-def get_pg_connection():
-    """
-    Context manager for obtaining a connection from the global PostgreSQL connection pool.
-    Safely yields a connection and returns it back to the pool.
-    """
-    conn = None
-    try:
-        conn = pg_pool.getconn()
-        yield conn
-    except Exception as e:
-        logger.error(f"Error while getting PostgreSQL connection: {e}")
-        raise
-    finally:
-        if conn:
-            pg_pool.putconn(conn)
 
 @contextmanager
 def get_connection(
@@ -71,6 +23,7 @@ def get_connection(
 ):
     """
     Context manager for creating and managing database connections.
+    Simplified version without connection pool to avoid context manager issues.
 
     :param db_name: Name of the database.
     :param db_type: Type of the database ('sqlite' or 'postgresql').
@@ -83,18 +36,16 @@ def get_connection(
     conn = None
     try:
         if db_type.lower() == 'postgresql':
-            # Create pool if not already created
-            if not pg_pool:
-                create_pg_pool(
-                    minconn=1,
-                    maxconn=10,
-                    dbname=db_name,
-                    user=user if user else '',
-                    password=password if password else '',
-                    host=host if host else 'localhost'
-                )
-            conn = pg_pool.getconn()
-            logger.info("Connected to PostgreSQL database using connection pool.")
+            # Direct connection without pool for Neon compatibility
+            conn = psycopg2.connect(
+                dbname=db_name,
+                user=user,
+                password=password,
+                host=host,
+                port=5432,
+                sslmode='require'  # Neon requires SSL
+            )
+            logger.info(f"Connected to PostgreSQL database: {db_name} at {host}")
         elif db_type.lower() == 'sqlite':
             conn = sqlite3.connect(db_name)
             logger.info("Connected to SQLite database.")
@@ -102,23 +53,45 @@ def get_connection(
             logger.error(f"Unsupported database type: {db_type}")
             yield None
             return
+            
         yield conn
-    except OperationalError as e:
-        logger.error(f"Operational error while connecting to the database: {e}")
+        
+    except psycopg2.OperationalError as e:
+        logger.error(f"PostgreSQL connection failed: {e}")
         yield None
     except Exception as e:
         logger.exception(f"Unexpected error while connecting to the database: {e}")
         yield None
     finally:
-        # Safely close the connection if it's not None
         if conn:
-            # If we used pg_pool, we should not close directly, but release the connection
-            if db_type.lower() == 'postgresql' and pg_pool:
-                pg_pool.putconn(conn)
-                logger.info("PostgreSQL connection returned to pool.")
-            else:
+            try:
                 conn.close()
-                logger.info("SQLite connection closed.")
+                logger.info("Database connection closed.")
+            except Exception as e:
+                logger.error(f"Error closing connection: {e}")
+
+def test_connection(db_name: str, db_type: str, host: Optional[str] = None, 
+                   user: Optional[str] = None, password: Optional[str] = None) -> bool:
+    """
+    Test if database connection is successful.
+    """
+    try:
+        with get_connection(db_name, db_type, host, user, password) as conn:
+            if conn:
+                if db_type.lower() == 'postgresql':
+                    cur = conn.cursor()
+                    cur.execute("SELECT 1")
+                    result = cur.fetchone()
+                    return result[0] == 1
+                elif db_type.lower() == 'sqlite':
+                    cur = conn.cursor()
+                    cur.execute("SELECT 1")
+                    result = cur.fetchone()
+                    return result[0] == 1
+        return False
+    except Exception as e:
+        logger.error(f"Connection test failed: {e}")
+        return False
 
 def query_database(
     query: str,
