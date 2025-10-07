@@ -1,13 +1,29 @@
+# --- 核心框架 ---
 streamlit
-plotly
+streamlit-extras
+streamlit-nested-layout
+
+# --- 数据分析与处理 ---
 pandas
 numpy
 scipy
 statsmodels
-jsonschema
-python-dotenv
-openai
+openpyxl
+
+# --- 可视化 ---
+plotly
+
+# --- 数据库与配置 ---
 sqlalchemy
 psycopg2-binary
-openpyxl
-streamlit-extras
+python-dotenv
+
+# --- AI/LLM 相关 ---
+openai
+
+# --- 校验、序列化 ---
+jsonschema
+
+# --- 其他工具类库（可选但建议保留） ---
+requests
+tqdm
