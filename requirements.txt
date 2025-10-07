@@ -10,3 +10,4 @@ openai
 sqlalchemy
 psycopg2-binary
 openpyxl
+streamlit-extras
