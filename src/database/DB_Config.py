@@ -17,33 +17,45 @@ logger = logging.getLogger(__name__)
 # Global variable to store PostgreSQL connection pool
 pg_pool = None
 
-def create_pg_pool(minconn: int, maxconn: int, dbname: str, user: str,
-                   password: str, host: str) -> None:
-    """
-    Creates or reinitializes a PostgreSQL connection pool to manage database connections.
 
-    :param minconn: Minimum number of connections in the pool.
-    :param maxconn: Maximum number of connections in the pool.
-    :param dbname:  Name of the database.
-    :param user:    Username for the database.
-    :param password:Password for the database.
-    :param host:    Host address for the database.
-    """
-    global pg_pool
+def create_pg_pool(db_name, host, user, password):
+    """Create PostgreSQL connection pool with SSL support."""
     try:
-        pg_pool = psycopg2.pool.SimpleConnectionPool(
-            minconn,
-            maxconn,
-            dbname=dbname,
-            user=user,
-            password=password,
-            host=host,
-            sslmode='require'  # Add SSL mode for Neon
+        # 对于 Neon.tech，需要 SSL 连接
+        conn_str = f"dbname={db_name} host={host} user={user} password={password} sslmode=require"
+
+        # 创建连接池
+        pool = psycopg2.pool.SimpleConnectionPool(
+            1, 20, conn_str
         )
-        if pg_pool:
-            logger.info("PostgreSQL connection pool created successfully.")
+
+        # 测试连接
+        test_conn = pool.getconn()
+        test_conn.close()
+        pool.putconn(test_conn)
+
+        logger.info("PostgreSQL connection pool created successfully with SSL.")
+        return pool
     except Exception as e:
         logger.error(f"Failed to create PostgreSQL connection pool: {e}")
+        return None
+
+@contextmanager
+def get_pg_connection():
+    """
+    Context manager for obtaining a connection from the global PostgreSQL connection pool.
+    Safely yields a connection and returns it back to the pool.
+    """
+    conn = None
+    try:
+        conn = pg_pool.getconn()
+        yield conn
+    except Exception as e:
+        logger.error(f"Error while getting PostgreSQL connection: {e}")
+        raise
+    finally:
+        if conn:
+            pg_pool.putconn(conn)
 
 @contextmanager
 def get_connection(
@@ -55,7 +67,6 @@ def get_connection(
 ):
     """
     Context manager for creating and managing database connections.
-    Fixed version with proper context manager handling.
 
     :param db_name: Name of the database.
     :param db_type: Type of the database ('sqlite' or 'postgresql').
@@ -66,8 +77,6 @@ def get_connection(
     :yields: A database connection object.
     """
     conn = None
-    connection_successful = False
-    
     try:
         if db_type.lower() == 'postgresql':
             # Create pool if not already created
@@ -80,28 +89,16 @@ def get_connection(
                     password=password if password else '',
                     host=host if host else 'localhost'
                 )
-            
-            if pg_pool:
-                conn = pg_pool.getconn()
-                logger.info("Connected to PostgreSQL database using connection pool.")
-                connection_successful = True
-            else:
-                logger.error("Failed to get connection from pool")
-                yield None
-                return
-                
+            conn = pg_pool.getconn()
+            logger.info("Connected to PostgreSQL database using connection pool.")
         elif db_type.lower() == 'sqlite':
             conn = sqlite3.connect(db_name)
             logger.info("Connected to SQLite database.")
-            connection_successful = True
         else:
             logger.error(f"Unsupported database type: {db_type}")
             yield None
             return
-            
-        # Yield the connection to the caller
         yield conn
-        
     except OperationalError as e:
         logger.error(f"Operational error while connecting to the database: {e}")
         yield None
@@ -109,45 +106,15 @@ def get_connection(
         logger.exception(f"Unexpected error while connecting to the database: {e}")
         yield None
     finally:
-        # Only handle connection cleanup if we successfully created a connection
-        if conn and connection_successful:
-            # If we used pg_pool, return the connection to the pool
+        # Safely close the connection if it's not None
+        if conn:
+            # If we used pg_pool, we should not close directly, but release the connection
             if db_type.lower() == 'postgresql' and pg_pool:
-                try:
-                    pg_pool.putconn(conn)
-                    logger.info("PostgreSQL connection returned to pool.")
-                except Exception as e:
-                    logger.error(f"Error returning connection to pool: {e}")
-            # For SQLite, close the connection
-            elif db_type.lower() == 'sqlite':
-                try:
-                    conn.close()
-                    logger.info("SQLite connection closed.")
-                except Exception as e:
-                    logger.error(f"Error closing SQLite connection: {e}")
-
-def test_connection(db_name: str, db_type: str, host: Optional[str] = None, 
-                   user: Optional[str] = None, password: Optional[str] = None) -> bool:
-    """
-    Test if database connection is successful.
-    """
-    try:
-        with get_connection(db_name, db_type, host, user, password) as conn:
-            if conn:
-                if db_type.lower() == 'postgresql':
-                    cur = conn.cursor()
-                    cur.execute("SELECT 1")
-                    result = cur.fetchone()
-                    return result[0] == 1
-                elif db_type.lower() == 'sqlite':
-                    cur = conn.cursor()
-                    cur.execute("SELECT 1")
-                    result = cur.fetchone()
-                    return result[0] == 1
-        return False
-    except Exception as e:
-        logger.error(f"Connection test failed: {e}")
-        return False
+                pg_pool.putconn(conn)
+                logger.info("PostgreSQL connection returned to pool.")
+            else:
+                conn.close()
+                logger.info("SQLite connection closed.")
 
 def query_database(
     query: str,
