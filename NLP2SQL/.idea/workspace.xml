@@ -5,11 +5,7 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="4a0ad3b5-8d37-4620-9672-368c480bc721" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/../.env.sample" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/../.github/workflows/CI.yml" beforeDir="false" afterPath="$PROJECT_DIR$/../.github/workflows/CI.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../.streamlit/config.toml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/../app/NLP2SQL.py" beforeDir="false" afterPath="$PROJECT_DIR$/../app/NLP2SQL.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../src/api/LLM_Config.py" beforeDir="false" afterPath="$PROJECT_DIR$/../src/api/LLM_Config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -33,7 +29,7 @@
     &quot;Python.LLM_Config.executor&quot;: &quot;Run&quot;,
     &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;v2&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
     &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
     &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
     &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
@@ -90,6 +86,8 @@
       <workItem from="1758778318859" duration="30000" />
       <workItem from="1758778413619" duration="23000" />
       <workItem from="1759196103723" duration="38000" />
+      <workItem from="1759660168144" duration="29000" />
+      <workItem from="1759805867083" duration="23000" />
     </task>
     <servers />
   </component>

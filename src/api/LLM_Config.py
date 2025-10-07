@@ -5,8 +5,9 @@ from dotenv import load_dotenv
 
 # 可按需安装：pip install dashscope
 # 可按需安装：pip install google-generativeai openai
-import google.generativeai as genai
+# import google.generativeai as genai
 import openai
+import dashscope
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -60,36 +61,36 @@ def _clean_markdown_code_fences(text: str) -> str:
     return text.strip()
 
 
-def get_completion_from_gemini(
-    system_message: str,
-    user_message: str,
-    temperature: float = 0.0
-) -> str:
-    """
-    使用 Google Gemini 生成回复。
-    """
-    try:
-        combined_message = f"{system_message}\n\nUser Query: {user_message}"
-        logger.info("=== INPUT (Gemini) ===")
-        logger.info(f"Temperature: {temperature}")
-        logger.info(f"Combined:\n{combined_message}")
-
-        # 你原本使用的是 'gemini-2.0-flash'，保留默认
-        model_name = MODEL_NAME or "gemini-2.0-flash"
-        model_instance = genai.GenerativeModel(model_name)
-        response = model_instance.generate_content(
-            contents=combined_message,
-            generation_config={"temperature": float(temperature)}
-        )
-
-        logger.info("=== RAW OUTPUT (Gemini) ===")
-        logger.info(f"{response}")
-
-        text = getattr(response, "text", "")
-        return _clean_markdown_code_fences(text)
-    except Exception as e:
-        logger.exception("Error generating response from Gemini")
-        raise
+# def get_completion_from_gemini(
+#     system_message: str,
+#     user_message: str,
+#     temperature: float = 0.0
+# ) -> str:
+#     """
+#     使用 Google Gemini 生成回复。
+#     """
+#     try:
+#         combined_message = f"{system_message}\n\nUser Query: {user_message}"
+#         logger.info("=== INPUT (Gemini) ===")
+#         logger.info(f"Temperature: {temperature}")
+#         logger.info(f"Combined:\n{combined_message}")
+#
+#         # 你原本使用的是 'gemini-2.0-flash'，保留默认
+#         model_name = MODEL_NAME or "gemini-2.0-flash"
+#         model_instance = genai.GenerativeModel(model_name)
+#         response = model_instance.generate_content(
+#             contents=combined_message,
+#             generation_config={"temperature": float(temperature)}
+#         )
+#
+#         logger.info("=== RAW OUTPUT (Gemini) ===")
+#         logger.info(f"{response}")
+#
+#         text = getattr(response, "text", "")
+#         return _clean_markdown_code_fences(text)
+#     except Exception as e:
+#         logger.exception("Error generating response from Gemini")
+#         raise
 
 
 def get_completion_from_azure(
@@ -216,6 +217,8 @@ def get_completion_from_messages(
     """
     logger.info(f"Using provider: {LLM_PROVIDER}")
 
+    # 如果配置为 GEMINI 但无法使用，自动降级到 QWEN
+    effective_provider = LLM_PROVIDER
     if LLM_PROVIDER == "GEMINI":
         return get_completion_from_gemini(
             system_message=system_message,
@@ -246,4 +249,5 @@ def get_completion_from_messages(
         )
 
     # 不应该走到这里（前面已做校验）
-    raise ValueError(f"Unsupported LLM provider: {LLM_PROVIDER}")
+    # raise ValueError(f"Unsupported LLM provider: {LLM_PROVIDER}")
+    raise ValueError(f"Unsupported LLM provider: {effective_provider}")
