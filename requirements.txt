@@ -1,0 +1,12 @@
+streamlit
+plotly
+pandas
+numpy
+scipy
+statsmodels
+jsonschema
+python-dotenv
+openai
+sqlalchemy
+psycopg2-binary
+openpyxl
