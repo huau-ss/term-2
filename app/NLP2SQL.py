@@ -105,6 +105,28 @@ apply_custom_theme()
 
 load_dotenv()
 
+# 在 app 启动时，主动创建 pool（每个进程运行一次）
+from src.database.DB_Config import create_pg_pool
+import streamlit as st
+
+def ensure_db_pool():
+    try:
+        # 从 st.secrets 或环境变量读取，按你实际配置替换
+        db_host = st.secrets.get("ep-calm-dawn-ad0l1wgc-pooler.c-2.us-east-1.aws.neon.tech")
+        db_name = st.secrets.get("neondb")
+        db_user = st.secrets.get("neondb_owner")
+        db_password = st.secrets.get("npg_BjzSN4etx8aK")
+        if db_host and db_name and db_user and db_password:
+            pool = create_pg_pool(1, 5, dbname=db_name, host=db_host, user=db_user, password=db_password)
+            st.session_state["db_pool_initialized"] = bool(pool)
+            st.write("DB pool init:", bool(pool))
+    except Exception as e:
+        st.warning(f"DB pool initialization error: {e}")
+
+# 在页面加载时调用（例如 main() 内）
+ensure_db_pool()
+
+
 import json
 from datetime import date, datetime
 from decimal import Decimal
