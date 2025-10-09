@@ -1,12 +1,12 @@
+# src/database/DB_Config.py
 import sqlite3
-from typing import Optional, Dict, Any, Union, List
+from typing import Optional, Dict, Any, List
 import logging
 import json
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
-import re
 
-# Optional psycopg2 imports; keep names even if import fails so code referencing them fails gracefully
+# psycopg2 optional import
 try:
     import psycopg2
     from psycopg2 import OperationalError, sql
@@ -17,14 +17,13 @@ except Exception:
     sql = None
 
 import pandas as pd
+import time
 
-# Configure logging for improved debug and info messages
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global variable to store PostgreSQL connection pool (one per process)
 pg_pool = None
-
 
 def create_pg_pool(minconn: int,
                    maxconn: int,
@@ -35,18 +34,12 @@ def create_pg_pool(minconn: int,
                    port: int = 5432,
                    sslmode: str = "require") -> Optional[Any]:
     """
-    Create PostgreSQL connection pool with SSL support (Neon requires sslmode=require).
-    Stores the created pool into module-level `pg_pool` and returns it.
-    Returns None on failure.
-
-    Arguments:
-      minconn, maxconn: pool size
-      dbname, host, user, password, port, sslmode: connection info
+    Create PostgreSQL connection pool and assign it to module-level pg_pool.
+    Returns the pool instance on success, or None on failure.
     """
     global pg_pool
-
     if psycopg2 is None:
-        logger.error("psycopg2 not installed; cannot create Postgres pool.")
+        logger.error("psycopg2 is not installed; cannot create Postgres pool.")
         return None
 
     try:
@@ -55,7 +48,7 @@ def create_pg_pool(minconn: int,
 
         pool = psycopg2.pool.SimpleConnectionPool(int(minconn), int(maxconn), conn_str)
 
-        # Smoke test: get and release a connection
+        # smoke test
         conn = pool.getconn()
         try:
             cur = conn.cursor()
@@ -71,8 +64,9 @@ def create_pg_pool(minconn: int,
                 except Exception:
                     pass
 
+        # assign to module global (CRITICAL)
         pg_pool = pool
-        logger.info("PostgreSQL connection pool created successfully with SSL and saved to global pg_pool (id=%s).", id(pg_pool))
+        logger.info("PostgreSQL connection pool created successfully and assigned to global pg_pool (id=%s).", id(pg_pool))
         return pg_pool
     except Exception as e:
         logger.exception("Failed to create PostgreSQL connection pool: %s", e)
@@ -81,59 +75,26 @@ def create_pg_pool(minconn: int,
 
 
 @contextmanager
-def get_pg_connection():
+def get_connection(db_name: str,
+                   db_type: str,
+                   host: Optional[str] = None,
+                   user: Optional[str] = None,
+                   password: Optional[str] = None,
+                   port: Optional[int] = 5432):
     """
-    Context manager for obtaining a connection from the global PostgreSQL connection pool.
-    Yields a psycopg2 connection. Caller should not close it directly; the manager will return it to the pool.
+    Robust get_connection: if pg_pool is None, try to create one and log everything clearly.
+    Yields a DB connection object or None on error.
     """
     global pg_pool
-    if pg_pool is None:
-        raise RuntimeError("PostgreSQL pool is not initialized. Call create_pg_pool() or use get_connection() which will attempt to create it.")
     conn = None
-    try:
-        conn = pg_pool.getconn()
-        yield conn
-    except Exception as e:
-        logger.exception("Error while getting PostgreSQL connection: %s", e)
-        raise
-    finally:
-        if conn and pg_pool:
-            try:
-                pg_pool.putconn(conn)
-            except Exception:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-
-
-@contextmanager
-def get_connection(
-    db_name: str,
-    db_type: str,
-    host: Optional[str] = None,
-    user: Optional[str] = None,
-    password: Optional[str] = None,
-    port: Optional[int] = 5432
-):
-    """
-    Context manager for creating and managing database connections.
-
-    For postgresql: ensures a pool exists (lazy-create) and yields a connection from it.
-    For sqlite: yields a sqlite3.Connection.
-
-    Returns None on failure (caller should check).
-    """
-    conn = None
-    global pg_pool
     try:
         if db_type.lower() == 'postgresql':
-            # If pg_pool not initialized, try to create it now
+            # If pool missing, attempt to create it and assign to global
             if not pg_pool:
-                logger.info("pg_pool is None — attempting to create a new pool from get_connection().")
-                created = create_pg_pool(
+                logger.warning("pg_pool is None in this process; attempting to create pool now.")
+                pool_created = create_pg_pool(
                     minconn=1,
-                    maxconn=10,
+                    maxconn=5,
                     dbname=db_name,
                     host=host or "localhost",
                     user=user or "",
@@ -141,14 +102,15 @@ def get_connection(
                     port=int(port) if port else 5432,
                     sslmode="require"
                 )
-                if not created:
-                    logger.error("create_pg_pool() returned None. PostgreSQL pool creation failed.")
+                # assign if returned but somehow not global (defensive)
+                if pool_created and pg_pool is None:
+                    pg_pool = pool_created
+                    logger.info("Assigned returned pool to pg_pool (defensive assignment). id=%s", id(pg_pool))
+                if not pg_pool:
+                    logger.error("create_pg_pool failed or returned no pool. Aborting.")
                     raise RuntimeError("PostgreSQL pool creation failed (see logs).")
 
-            if pg_pool is None:
-                logger.error("pg_pool still None after attempted creation.")
-                raise RuntimeError("pg_pool is None after create attempt.")
-
+            # now get a connection
             logger.info("Using pg_pool (id=%s) to obtain connection.", id(pg_pool))
             conn = pg_pool.getconn()
             logger.info("Obtained connection from pg_pool.")
@@ -156,7 +118,7 @@ def get_connection(
             conn = sqlite3.connect(db_name)
             logger.info("Connected to SQLite database.")
         else:
-            logger.error(f"Unsupported database type: {db_type}")
+            logger.error("Unsupported database type: %s", db_type)
             yield None
             return
 
@@ -181,36 +143,25 @@ def get_connection(
                         except Exception:
                             pass
                 else:
-                    try:
-                        conn.close()
-                        logger.info("SQLite connection closed.")
-                    except Exception:
-                        pass
+                    conn.close()
+                    logger.info("SQLite connection closed.")
             except Exception:
-                logger.debug("Exception while releasing/closing connection.", exc_info=True)
+                logger.debug("Exception while releasing connection", exc_info=True)
 
 
-def query_database(
-    query: str,
-    db_name: str,
-    db_type: str,
-    host: Optional[str] = None,
-    user: Optional[str] = None,
-    password: Optional[str] = None,
-    port: Optional[int] = 5432,
-    limit: int = None,
-    offset: int = 0
-) -> pd.DataFrame:
-    """
-    Executes an SQL query on the specified database and returns the results as a Pandas DataFrame.
-    If a limit is provided and the query is a SELECT without a LIMIT clause,
-    automatically appends the LIMIT and OFFSET.
-    """
+def query_database(query: str,
+                   db_name: str,
+                   db_type: str,
+                   host: Optional[str] = None,
+                   user: Optional[str] = None,
+                   password: Optional[str] = None,
+                   port: Optional[int] = 5432,
+                   limit: int = None,
+                   offset: int = 0) -> pd.DataFrame:
     with get_connection(db_name, db_type, host, user, password, port) as conn:
         if conn is None:
             logger.error("Database connection failed. Returning empty DataFrame.")
             return pd.DataFrame()
-
         modified_query = query
         if db_type.lower() in ['sqlite', 'postgresql'] and query.strip().lower().startswith('select'):
             if limit is not None and "limit" not in query.lower():
@@ -221,23 +172,20 @@ def query_database(
             logger.info("Query executed successfully.")
             return df
         except Exception as e:
-            logger.exception(f"Unexpected error executing query: {e}")
+            logger.exception("Unexpected error executing query: %s", e)
             return pd.DataFrame()
 
 
-# --- Abstract Schema Extractor Class ---
+# Schema extractor code (unchanged)...
 class SchemaExtractor(ABC):
     def __init__(self, connection):
         self.conn = connection
-
     @abstractmethod
     def get_tables(self) -> List[str]:
         pass
-
     @abstractmethod
     def get_table_info(self, table_name: str) -> Dict[str, Any]:
         pass
-
 
 # --- SQLite Schema Extraction ---
 def get_sqlite_table_info(cursor, table_name: str) -> Dict[str, Any]:
