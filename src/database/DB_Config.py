@@ -1,61 +1,111 @@
 import sqlite3
 from typing import Optional, Dict, Any, Union, List
-import psycopg2
-from psycopg2 import OperationalError, sql
-import pandas as pd
 import logging
 import json
 from contextlib import contextmanager
 from abc import ABC, abstractmethod
-import psycopg2.pool
 import re
+
+# Optional psycopg2 imports; keep names even if import fails so code referencing them fails gracefully
+try:
+    import psycopg2
+    from psycopg2 import OperationalError, sql
+    import psycopg2.pool
+except Exception:
+    psycopg2 = None
+    OperationalError = Exception
+    sql = None
+
+import pandas as pd
 
 # Configure logging for improved debug and info messages
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global variable to store PostgreSQL connection pool
+# Global variable to store PostgreSQL connection pool (one per process)
 pg_pool = None
 
 
-def create_pg_pool(minconn, maxconn, dbname, host, user, password):
-    """Create PostgreSQL connection pool with SSL support."""
-    try:
-        # 对于 Neon.tech，需要 SSL 连接
-        conn_str = f"dbname={dbname} host={host} user={user} password={password} sslmode=require"
+def create_pg_pool(minconn: int,
+                   maxconn: int,
+                   dbname: str,
+                   host: str,
+                   user: str,
+                   password: str,
+                   port: int = 5432,
+                   sslmode: str = "require") -> Optional[Any]:
+    """
+    Create PostgreSQL connection pool with SSL support (Neon requires sslmode=require).
+    Stores the created pool into module-level `pg_pool` and returns it.
+    Returns None on failure.
 
-        # 创建连接池
-        pool = psycopg2.pool.SimpleConnectionPool(
-            minconn, maxconn, conn_str
-        )
+    Arguments:
+      minconn, maxconn: pool size
+      dbname, host, user, password, port, sslmode: connection info
+    """
+    global pg_pool
 
-        # 测试连接
-        test_conn = pool.getconn()
-        test_conn.close()
-        pool.putconn(test_conn)
-
-        logger.info("PostgreSQL connection pool created successfully with SSL.")
-        return pool
-    except Exception as e:
-        logger.error(f"Failed to create PostgreSQL connection pool: {e}")
+    if psycopg2 is None:
+        logger.error("psycopg2 not installed; cannot create Postgres pool.")
         return None
-        
+
+    try:
+        conn_str = f"dbname={dbname} host={host} user={user} password={password} port={port} sslmode={sslmode}"
+        logger.info("Creating Postgres pool -> host=%s dbname=%s user=%s min=%s max=%s", host, dbname, user, minconn, maxconn)
+
+        pool = psycopg2.pool.SimpleConnectionPool(int(minconn), int(maxconn), conn_str)
+
+        # Smoke test: get and release a connection
+        conn = pool.getconn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1;")
+            _ = cur.fetchone()
+            cur.close()
+        finally:
+            try:
+                pool.putconn(conn)
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        pg_pool = pool
+        logger.info("PostgreSQL connection pool created successfully with SSL and saved to global pg_pool (id=%s).", id(pg_pool))
+        return pg_pool
+    except Exception as e:
+        logger.exception("Failed to create PostgreSQL connection pool: %s", e)
+        pg_pool = None
+        return None
+
+
 @contextmanager
 def get_pg_connection():
     """
     Context manager for obtaining a connection from the global PostgreSQL connection pool.
-    Safely yields a connection and returns it back to the pool.
+    Yields a psycopg2 connection. Caller should not close it directly; the manager will return it to the pool.
     """
+    global pg_pool
+    if pg_pool is None:
+        raise RuntimeError("PostgreSQL pool is not initialized. Call create_pg_pool() or use get_connection() which will attempt to create it.")
     conn = None
     try:
         conn = pg_pool.getconn()
         yield conn
     except Exception as e:
-        logger.error(f"Error while getting PostgreSQL connection: {e}")
+        logger.exception("Error while getting PostgreSQL connection: %s", e)
         raise
     finally:
-        if conn:
-            pg_pool.putconn(conn)
+        if conn and pg_pool:
+            try:
+                pg_pool.putconn(conn)
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
 
 @contextmanager
 def get_connection(
@@ -63,34 +113,45 @@ def get_connection(
     db_type: str,
     host: Optional[str] = None,
     user: Optional[str] = None,
-    password: Optional[str] = None
+    password: Optional[str] = None,
+    port: Optional[int] = 5432
 ):
     """
     Context manager for creating and managing database connections.
 
-    :param db_name: Name of the database.
-    :param db_type: Type of the database ('sqlite' or 'postgresql').
-    :param host:    Host address for PostgreSQL.
-    :param user:    Username for PostgreSQL.
-    :param password:Password for PostgreSQL.
+    For postgresql: ensures a pool exists (lazy-create) and yields a connection from it.
+    For sqlite: yields a sqlite3.Connection.
 
-    :yields: A database connection object.
+    Returns None on failure (caller should check).
     """
     conn = None
+    global pg_pool
     try:
         if db_type.lower() == 'postgresql':
-            # Create pool if not already created
+            # If pg_pool not initialized, try to create it now
             if not pg_pool:
-                create_pg_pool(
+                logger.info("pg_pool is None — attempting to create a new pool from get_connection().")
+                created = create_pg_pool(
                     minconn=1,
                     maxconn=10,
                     dbname=db_name,
-                    user=user if user else '',
-                    password=password if password else '',
-                    host=host if host else 'localhost'
+                    host=host or "localhost",
+                    user=user or "",
+                    password=password or "",
+                    port=int(port) if port else 5432,
+                    sslmode="require"
                 )
+                if not created:
+                    logger.error("create_pg_pool() returned None. PostgreSQL pool creation failed.")
+                    raise RuntimeError("PostgreSQL pool creation failed (see logs).")
+
+            if pg_pool is None:
+                logger.error("pg_pool still None after attempted creation.")
+                raise RuntimeError("pg_pool is None after create attempt.")
+
+            logger.info("Using pg_pool (id=%s) to obtain connection.", id(pg_pool))
             conn = pg_pool.getconn()
-            logger.info("Connected to PostgreSQL database using connection pool.")
+            logger.info("Obtained connection from pg_pool.")
         elif db_type.lower() == 'sqlite':
             conn = sqlite3.connect(db_name)
             logger.info("Connected to SQLite database.")
@@ -98,23 +159,36 @@ def get_connection(
             logger.error(f"Unsupported database type: {db_type}")
             yield None
             return
+
         yield conn
+
     except OperationalError as e:
-        logger.error(f"Operational error while connecting to the database: {e}")
+        logger.exception("Operational error while connecting to the database: %s", e)
         yield None
     except Exception as e:
-        logger.exception(f"Unexpected error while connecting to the database: {e}")
+        logger.exception("Unexpected error while connecting to the database: %s", e)
         yield None
     finally:
-        # Safely close the connection if it's not None
         if conn:
-            # If we used pg_pool, we should not close directly, but release the connection
-            if db_type.lower() == 'postgresql' and pg_pool:
-                pg_pool.putconn(conn)
-                logger.info("PostgreSQL connection returned to pool.")
-            else:
-                conn.close()
-                logger.info("SQLite connection closed.")
+            try:
+                if db_type.lower() == 'postgresql' and pg_pool:
+                    try:
+                        pg_pool.putconn(conn)
+                        logger.info("PostgreSQL connection returned to pool.")
+                    except Exception:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        conn.close()
+                        logger.info("SQLite connection closed.")
+                    except Exception:
+                        pass
+            except Exception:
+                logger.debug("Exception while releasing/closing connection.", exc_info=True)
+
 
 def query_database(
     query: str,
@@ -123,6 +197,7 @@ def query_database(
     host: Optional[str] = None,
     user: Optional[str] = None,
     password: Optional[str] = None,
+    port: Optional[int] = 5432,
     limit: int = None,
     offset: int = 0
 ) -> pd.DataFrame:
@@ -130,19 +205,8 @@ def query_database(
     Executes an SQL query on the specified database and returns the results as a Pandas DataFrame.
     If a limit is provided and the query is a SELECT without a LIMIT clause,
     automatically appends the LIMIT and OFFSET.
-
-    :param query:   SQL query string to execute.
-    :param db_name: Database name.
-    :param db_type: Database type ('sqlite' or 'postgresql').
-    :param host:    Database host (PostgreSQL only).
-    :param user:    Database user (PostgreSQL only).
-    :param password:Database password (PostgreSQL only).
-    :param limit:   Maximum number of rows to return.
-    :param offset:  Number of rows to skip before starting to return rows.
-
-    :return:        A Pandas DataFrame containing the query results, or an empty DataFrame on error.
     """
-    with get_connection(db_name, db_type, host, user, password) as conn:
+    with get_connection(db_name, db_type, host, user, password, port) as conn:
         if conn is None:
             logger.error("Database connection failed. Returning empty DataFrame.")
             return pd.DataFrame()
@@ -151,7 +215,7 @@ def query_database(
         if db_type.lower() in ['sqlite', 'postgresql'] and query.strip().lower().startswith('select'):
             if limit is not None and "limit" not in query.lower():
                 modified_query = f"{query.rstrip(';')} LIMIT {limit} OFFSET {offset};"
-                logger.warning("Query truncated with LIMIT 100 for performance. Use pagination for full results.")
+                logger.warning("Query truncated with LIMIT for performance. Use pagination for full results.")
         try:
             df = pd.read_sql_query(modified_query, conn)
             logger.info("Query executed successfully.")
@@ -160,43 +224,23 @@ def query_database(
             logger.exception(f"Unexpected error executing query: {e}")
             return pd.DataFrame()
 
+
 # --- Abstract Schema Extractor Class ---
-
 class SchemaExtractor(ABC):
-    """
-    Abstract base class for extracting schema information from a database.
-
-    Implementing classes must provide methods to get all table names and
-    detailed schema info for each table.
-    """
     def __init__(self, connection):
         self.conn = connection
 
     @abstractmethod
     def get_tables(self) -> List[str]:
-        """
-        Returns a list of all table names in the database schema.
-        """
         pass
 
     @abstractmethod
     def get_table_info(self, table_name: str) -> Dict[str, Any]:
-        """
-        Returns a dictionary describing the schema of the specified table.
-        """
         pass
 
+
 # --- SQLite Schema Extraction ---
-
 def get_sqlite_table_info(cursor, table_name: str) -> Dict[str, Any]:
-    """
-    Retrieve detailed schema information for a given SQLite table, including columns,
-    primary keys, foreign keys, indexes, triggers, and sample data.
-
-    :param cursor:    SQLite cursor object.
-    :param table_name:Name of the table to extract schema information.
-    :return:          Dictionary containing table schema details.
-    """
     table_info = {
         'columns': {},
         'foreign_keys': [],
@@ -207,7 +251,6 @@ def get_sqlite_table_info(cursor, table_name: str) -> Dict[str, Any]:
         'triggers': []
     }
 
-    # Fetch column metadata
     cursor.execute(f"PRAGMA table_info('{table_name}');")
     columns = cursor.fetchall()
     for col in columns:
@@ -221,11 +264,9 @@ def get_sqlite_table_info(cursor, table_name: str) -> Dict[str, Any]:
         if pk:
             table_info['primary_keys'].append(col_name)
 
-    # Fetch foreign key constraints
     cursor.execute(f"PRAGMA foreign_key_list('{table_name}');")
     fkeys = cursor.fetchall()
     for fk in fkeys:
-        # columns: (id, seq, table, from, to, on_update, on_delete, match)
         _, _, ref_table, from_col, to_col, on_update, on_delete, _ = fk
         table_info['foreign_keys'].append({
             'from_column': from_col,
@@ -235,11 +276,10 @@ def get_sqlite_table_info(cursor, table_name: str) -> Dict[str, Any]:
             'on_delete': on_delete
         })
 
-    # Fetch indexes
     cursor.execute(f"PRAGMA index_list('{table_name}');")
     indexes = cursor.fetchall()
     for idx in indexes:
-        idx_id, idx_name, unique_flag, _ = idx[0], idx[1], idx[2], idx[3] if len(idx) > 3 else None
+        idx_id, idx_name, unique_flag = idx[0], idx[1], idx[2]
         cursor.execute(f"PRAGMA index_info('{idx_name}');")
         index_columns = cursor.fetchall()
         table_info['indexes'].append({
@@ -248,7 +288,6 @@ def get_sqlite_table_info(cursor, table_name: str) -> Dict[str, Any]:
             'columns': [col[2] for col in index_columns]
         })
 
-    # Fetch sample data
     try:
         cursor.execute(f"SELECT * FROM '{table_name}' LIMIT 5;")
         rows = cursor.fetchall()
@@ -258,8 +297,6 @@ def get_sqlite_table_info(cursor, table_name: str) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"Unable to retrieve sample data for table {table_name}: {e}")
 
-    # SQLite triggers
-    # There's no simple PRAGMA for triggers, so we can check sqlite_master
     cursor.execute(f"SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='{table_name}';")
     trigger_rows = cursor.fetchall()
     for tr in trigger_rows:
@@ -271,31 +308,20 @@ def get_sqlite_table_info(cursor, table_name: str) -> Dict[str, Any]:
 
     return table_info
 
+
 class SQLiteSchemaExtractor(SchemaExtractor):
-    """
-    Extracts schema information from a SQLite database.
-    """
     def get_tables(self) -> List[str]:
         cursor = self.conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
-        tables = [row[0] for row in cursor.fetchall()]
-        return tables
+        return [row[0] for row in cursor.fetchall()]
 
     def get_table_info(self, table_name: str) -> Dict[str, Any]:
         cursor = self.conn.cursor()
         return get_sqlite_table_info(cursor, table_name)
 
+
 # --- PostgreSQL Schema Extraction ---
-
 def get_postgresql_table_info(cursor, table_name: str) -> Dict[str, Any]:
-    """
-    Retrieve detailed schema information for a given PostgreSQL table, including columns,
-    primary keys, foreign keys, indexes, triggers, and sample data.
-
-    :param cursor:    PostgreSQL cursor object.
-    :param table_name:Name of the table to extract schema information.
-    :return:          Dictionary containing table schema details.
-    """
     table_info = {
         'columns': {},
         'foreign_keys': [],
@@ -306,7 +332,6 @@ def get_postgresql_table_info(cursor, table_name: str) -> Dict[str, Any]:
         'triggers': []
     }
 
-    # Get column information
     cursor.execute(
         """
         SELECT
@@ -330,7 +355,6 @@ def get_postgresql_table_info(cursor, table_name: str) -> Dict[str, Any]:
             'primary_key': False
         }
 
-    # Primary key info
     cursor.execute(
         """
         SELECT kcu.column_name
@@ -349,7 +373,6 @@ def get_postgresql_table_info(cursor, table_name: str) -> Dict[str, Any]:
             table_info['columns'][pk_col]['primary_key'] = True
             table_info['primary_keys'].append(pk_col)
 
-    # Foreign key info
     cursor.execute(
         """
         SELECT
@@ -381,7 +404,6 @@ def get_postgresql_table_info(cursor, table_name: str) -> Dict[str, Any]:
             'on_delete': on_delete
         })
 
-    # Indexes
     cursor.execute(
         """
         SELECT indexname, indexdef
@@ -392,10 +414,8 @@ def get_postgresql_table_info(cursor, table_name: str) -> Dict[str, Any]:
     )
     indexes = cursor.fetchall()
     for idx_name, idx_def in indexes:
-        # Attempt to parse the columns from the index definition
         idx_columns = []
         try:
-            # Typically looks like: CREATE [UNIQUE] INDEX indexname ON tablename USING btree (col1, col2)
             start = idx_def.index('(')
             end = idx_def.rindex(')')
             cols_part = idx_def[start + 1:end]
@@ -409,8 +429,6 @@ def get_postgresql_table_info(cursor, table_name: str) -> Dict[str, Any]:
             'columns': idx_columns
         })
 
-    # Triggers
-    # Query pg_trigger joined with pg_class to get triggers for the table
     cursor.execute(
         """
         SELECT tgname, pg_get_triggerdef(t.oid)
@@ -428,7 +446,6 @@ def get_postgresql_table_info(cursor, table_name: str) -> Dict[str, Any]:
             'definition': tr_def
         })
 
-    # Sample data
     try:
         cursor.execute(sql.SQL("SELECT * FROM {} LIMIT 5;").format(sql.Identifier(table_name)))
         sample_data = cursor.fetchall()
@@ -440,10 +457,8 @@ def get_postgresql_table_info(cursor, table_name: str) -> Dict[str, Any]:
 
     return table_info
 
+
 class PostgreSQLSchemaExtractor(SchemaExtractor):
-    """
-    Extracts schema information from a PostgreSQL database.
-    """
     def get_tables(self) -> List[str]:
         cursor = self.conn.cursor()
         cursor.execute(
@@ -459,15 +474,9 @@ class PostgreSQLSchemaExtractor(SchemaExtractor):
         cursor = self.conn.cursor()
         return get_postgresql_table_info(cursor, table_name)
 
+
 # --- Utility for generating a structured JSON string (optional) ---
 def generate_json_schema(table_name: str, table_info: Dict[str, Any]) -> str:
-    """
-    Generates a JSON representation of a single table's schema.
-
-    :param table_name: Name of the table.
-    :param table_info: A dictionary containing the table's schema details.
-    :return:           A JSON string with the formatted schema.
-    """
     schema = {
         "object": table_name,
         "columns": table_info.get('columns', {}),
@@ -480,7 +489,7 @@ def generate_json_schema(table_name: str, table_info: Dict[str, Any]) -> str:
     }
     return json.dumps(schema, indent=2)
 
-# --- Main entry point for schema retrieval ---
+
 def get_all_schemas(
     db_name: str,
     db_type: str,
@@ -488,18 +497,6 @@ def get_all_schemas(
     user: Optional[str] = None,
     password: Optional[str] = None
 ) -> Dict[str, Dict[str, Any]]:
-    """
-    Retrieves schema information for all tables in the given database and returns a nested dictionary.
-    Each table name maps to a dictionary of schema components.
-
-    :param db_name:  Name of the database.
-    :param db_type:  Type of the database ('sqlite' or 'postgresql').
-    :param host:     Host address (PostgreSQL only).
-    :param user:     User name (PostgreSQL only).
-    :param password: Password (PostgreSQL only).
-
-    :return: A dictionary keyed by table name, where each value is a dictionary containing schema details.
-    """
     schemas = {}
 
     with get_connection(db_name, db_type, host, user, password) as conn:
@@ -507,7 +504,6 @@ def get_all_schemas(
             logger.error("Database connection failed. Returning empty schema.")
             return {}
 
-        # Decide which extractor class to use
         if db_type.lower() == 'sqlite':
             extractor = SQLiteSchemaExtractor(conn)
         elif db_type.lower() == 'postgresql':
@@ -516,8 +512,38 @@ def get_all_schemas(
             logger.error(f"Unsupported database type: {db_type}")
             return {}
 
-        # Iterate through all tables and retrieve schema info
         for table in extractor.get_tables():
             schemas[table] = extractor.get_table_info(table)
 
     return schemas
+
+
+# --- Quick utility to test connection and list tables ---
+def test_connection_quick(db_name, db_type, host=None, user=None, password=None, port=5432):
+    """
+    Quick check: attempt to connect and list tables. Returns list of table names or [].
+    Useful to run in deployment shell or Streamlit button to verify connectivity.
+    """
+    logger.info("Running quick connection test for %s@%s (db=%s)", user, host, db_name)
+    try:
+        tables = []
+        with get_connection(db_name, db_type, host, user, password, port) as conn:
+            if conn is None:
+                logger.error("Quick test: connection returned None.")
+                return []
+            if db_type.lower() == 'postgresql':
+                cur = conn.cursor()
+                cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema='public';")
+                tables = [r[0] for r in cur.fetchall()]
+                cur.close()
+                logger.info("Quick test found Postgres tables: %s", tables)
+            else:
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+                tables = [r[0] for r in cur.fetchall()]
+                cur.close()
+                logger.info("Quick test found SQLite tables: %s", tables)
+        return tables
+    except Exception as e:
+        logger.exception("Quick connection test failed: %s", e)
+        return []
