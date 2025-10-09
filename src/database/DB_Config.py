@@ -18,15 +18,15 @@ logger = logging.getLogger(__name__)
 pg_pool = None
 
 
-def create_pg_pool(db_name, host, user, password):
+def create_pg_pool(minconn, maxconn, dbname, host, user, password):
     """Create PostgreSQL connection pool with SSL support."""
     try:
         # 对于 Neon.tech，需要 SSL 连接
-        conn_str = f"dbname={db_name} host={host} user={user} password={password} sslmode=require"
+        conn_str = f"dbname={dbname} host={host} user={user} password={password} sslmode=require"
 
         # 创建连接池
         pool = psycopg2.pool.SimpleConnectionPool(
-            1, 20, conn_str
+            minconn, maxconn, conn_str
         )
 
         # 测试连接
@@ -39,7 +39,7 @@ def create_pg_pool(db_name, host, user, password):
     except Exception as e:
         logger.error(f"Failed to create PostgreSQL connection pool: {e}")
         return None
-
+        
 @contextmanager
 def get_pg_connection():
     """
