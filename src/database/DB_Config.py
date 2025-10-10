@@ -1,4 +1,3 @@
-# src/database/DB_Config.py
 import sqlite3
 from typing import Optional, Dict, Any, List
 import logging
@@ -22,7 +21,7 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Global variable to store PostgreSQL connection pool (one per process)
+# 全局 PostgreSQL 连接池实例
 pg_pool = None
 
 def create_pg_pool(minconn: int,
@@ -34,8 +33,9 @@ def create_pg_pool(minconn: int,
                    port: int = 5432,
                    sslmode: str = "require") -> Optional[Any]:
     """
-    Create PostgreSQL connection pool and assign it to module-level pg_pool.
-    Returns the pool instance on success, or None on failure.
+    尝试使用 psycopg2 创建 SimpleConnectionPool 并进行 smoke test（执行 SELECT 1）。
+    - 成功则把 pool 赋值给模块全局 pg_pool 并返回实例。
+    - 如果 psycopg2 不可用或创建失败，返回 None 并记录错误。
     """
     global pg_pool
     if psycopg2 is None:
@@ -48,7 +48,7 @@ def create_pg_pool(minconn: int,
 
         pool = psycopg2.pool.SimpleConnectionPool(int(minconn), int(maxconn), conn_str)
 
-        # smoke test
+        # 冒烟测试
         conn = pool.getconn()
         try:
             cur = conn.cursor()
@@ -64,7 +64,6 @@ def create_pg_pool(minconn: int,
                 except Exception:
                     pass
 
-        # assign to module global (CRITICAL)
         pg_pool = pool
         logger.info("PostgreSQL connection pool created successfully and assigned to global pg_pool (id=%s).", id(pg_pool))
         return pg_pool
@@ -73,7 +72,7 @@ def create_pg_pool(minconn: int,
         pg_pool = None
         return None
 
-
+#连接上下文管理器
 @contextmanager
 def get_connection(db_name: str,
                    db_type: str,
@@ -82,14 +81,17 @@ def get_connection(db_name: str,
                    password: Optional[str] = None,
                    port: Optional[int] = 5432):
     """
-    Robust get_connection: if pg_pool is None, try to create one and log everything clearly.
-    Yields a DB connection object or None on error.
+    如果 db_type == 'postgresql'：先确保 pg_pool 存在（否则尝试创建），然后从 pg_pool.getconn() 获取连接并 yield。
+      finally 中会把连接 putconn 回池（若失败则关闭连接）。
+    - 如果 db_type == 'sqlite'：直接 sqlite3.connect(db_name) 并 yield，finally 中关闭连接。
+    - 捕获 OperationalError 与一般异常，出错时 yield None。
+    该函数保证连接的获取与释放逻辑集中、可观测（日志记录）。:contentReference[oaicite:18]{index=18}
     """
     global pg_pool
     conn = None
     try:
         if db_type.lower() == 'postgresql':
-            # If pool missing, attempt to create it and assign to global
+            # 如果没有连接池，则动态创建一个
             if not pg_pool:
                 logger.warning("pg_pool is None in this process; attempting to create pool now.")
                 pool_created = create_pg_pool(
@@ -102,7 +104,7 @@ def get_connection(db_name: str,
                     port=int(port) if port else 5432,
                     sslmode="require"
                 )
-                # assign if returned but somehow not global (defensive)
+                # 保证全局池存在
                 if pool_created and pg_pool is None:
                     pg_pool = pool_created
                     logger.info("Assigned returned pool to pg_pool (defensive assignment). id=%s", id(pg_pool))
@@ -110,7 +112,7 @@ def get_connection(db_name: str,
                     logger.error("create_pg_pool failed or returned no pool. Aborting.")
                     raise RuntimeError("PostgreSQL pool creation failed (see logs).")
 
-            # now get a connection
+            # 从连接池中取一个可用连接
             logger.info("Using pg_pool (id=%s) to obtain connection.", id(pg_pool))
             conn = pg_pool.getconn()
             logger.info("Obtained connection from pg_pool.")
@@ -148,7 +150,7 @@ def get_connection(db_name: str,
             except Exception:
                 logger.debug("Exception while releasing connection", exc_info=True)
 
-
+# 执行 SQL 并返回 DataFrame
 def query_database(query: str,
                    db_name: str,
                    db_type: str,
@@ -176,7 +178,7 @@ def query_database(query: str,
             return pd.DataFrame()
 
 
-# Schema extractor code (unchanged)...
+# 定义 schema 抽取器接口
 class SchemaExtractor(ABC):
     def __init__(self, connection):
         self.conn = connection
@@ -187,7 +189,7 @@ class SchemaExtractor(ABC):
     def get_table_info(self, table_name: str) -> Dict[str, Any]:
         pass
 
-# --- SQLite Schema Extraction ---
+# SQLite Schema
 def get_sqlite_table_info(cursor, table_name: str) -> Dict[str, Any]:
     table_info = {
         'columns': {},
@@ -258,17 +260,19 @@ def get_sqlite_table_info(cursor, table_name: str) -> Dict[str, Any]:
 
 
 class SQLiteSchemaExtractor(SchemaExtractor):
+    # 列出非 sqlite_ 前缀的用户表
     def get_tables(self) -> List[str]:
         cursor = self.conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
         return [row[0] for row in cursor.fetchall()]
 
+    #返回表结构信息
     def get_table_info(self, table_name: str) -> Dict[str, Any]:
         cursor = self.conn.cursor()
         return get_sqlite_table_info(cursor, table_name)
 
 
-# --- PostgreSQL Schema Extraction ---
+# PostgreSQL Schema
 def get_postgresql_table_info(cursor, table_name: str) -> Dict[str, Any]:
     table_info = {
         'columns': {},
@@ -407,6 +411,7 @@ def get_postgresql_table_info(cursor, table_name: str) -> Dict[str, Any]:
 
 
 class PostgreSQLSchemaExtractor(SchemaExtractor):
+    #列出 public schema 下的所有表名
     def get_tables(self) -> List[str]:
         cursor = self.conn.cursor()
         cursor.execute(
@@ -417,13 +422,13 @@ class PostgreSQLSchemaExtractor(SchemaExtractor):
             """
         )
         return [row[0] for row in cursor.fetchall()]
-
+    #获取单表详细信息
     def get_table_info(self, table_name: str) -> Dict[str, Any]:
         cursor = self.conn.cursor()
         return get_postgresql_table_info(cursor, table_name)
 
 
-# --- Utility for generating a structured JSON string (optional) ---
+
 def generate_json_schema(table_name: str, table_info: Dict[str, Any]) -> str:
     schema = {
         "object": table_name,
@@ -437,7 +442,8 @@ def generate_json_schema(table_name: str, table_info: Dict[str, Any]) -> str:
     }
     return json.dumps(schema, indent=2)
 
-
+# 统一入口：基于 db_type 选择对应 extractor，并循环 extractor.get_tables()/get_table_info() 获取所有表的 schema 信息。
+# 如果连接失败或 db_type 不支持，返回空 dict 并写日志。
 def get_all_schemas(
     db_name: str,
     db_type: str,
@@ -466,7 +472,7 @@ def get_all_schemas(
     return schemas
 
 
-# --- Quick utility to test connection and list tables ---
+# 快速检查连接是否成功并列出表
 def test_connection_quick(db_name, db_type, host=None, user=None, password=None, port=5432):
     """
     Quick check: attempt to connect and list tables. Returns list of table names or [].
