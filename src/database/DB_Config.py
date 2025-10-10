@@ -474,10 +474,6 @@ def get_all_schemas(
 
 # 快速检查连接是否成功并列出表
 def test_connection_quick(db_name, db_type, host=None, user=None, password=None, port=5432):
-    """
-    Quick check: attempt to connect and list tables. Returns list of table names or [].
-    Useful to run in deployment shell or Streamlit button to verify connectivity.
-    """
     logger.info("Running quick connection test for %s@%s (db=%s)", user, host, db_name)
     try:
         tables = []
